@@ -1,0 +1,13 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+.DS_Store
+*.pyc
+docs/build
+.*.sw?
+*.so
+*.o
+dependencies/
+tests/keys/
+build/
+dist/
+pytaps.egg-info/
