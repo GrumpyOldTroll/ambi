@@ -8,11 +8,28 @@ class AmbiFramer(taps.Framer):
         self.local_endpoint = local_endpoint
         self.preconnection = None
         self.connection = None
+    
+    async def handle_received_partial(self, data, context, end_of_message,
+                                      connection):
+        taps.print_time("Received partial message " + str(data) + ".", color)
+        await self.connection.receive(min_incomplete_length=1)
+
+    async def handle_received(self, data, context, connection):
+        taps.print_time("Received message " + str(data) + ".", color)
+        await self.connection.receive(min_incomplete_length=1)
+    
+    async def handle_ready(self, connection):
+        print("Connection ready")
+        msgref = await self.connection.receive()
+        self.connection.on_received_partial(self.handle_received_partial)
+        self.connection.on_received(self.handle_received)
+        await self.connection.receive(min_incomplete_length=1)
 
     async def start(self, connection):
         
         tp = taps.TransportProperties()
         self.preconnection = taps.Preconnection(remote_endpoint=self.remote_endpoint, local_endpoint=self.local_endpoint, transport_properties=tp)
+        self.preconnection.on_ready(self.handle_ready)
         self.connection = await self.preconnection.initiate()
 
 class AmbiClient():
@@ -31,7 +48,7 @@ class AmbiClient():
         ssm.with_port(args.ssm_port)
 
         rambi = taps.RemoteEndpoint()
-        rambi.with_address(args.remote_ambi_address)
+        rambi.with_address([args.remote_ambi_address])
         rambi.with_port(args.remote_ambi_port)
         if args.local_ambi_address is not None:
             lambi = taps.LocalEndpoint()
