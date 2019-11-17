@@ -2,6 +2,8 @@ import pytaps as taps
 import argparse
 import asyncio
 
+color="blue"
+
 class AmbiFramer(taps.Framer):
     def __init__(self, remote_endpoint, security_parameters=None, local_endpoint=None):
         self.remote_endpoint = remote_endpoint
