@@ -73,13 +73,14 @@ class ManifestBuilder(object):
         if time_limit:
             self.time_limit = datetime.timedelta(seconds=time_limit)
         self.packet_limit = packet_limit
+        self.sender = None
+        self.loop = asyncio.get_event_loop()
 
     def got_packet(self, data, source_port):
         # TBD: handle wrapping
         # TBD: graceful shutdown signal to pick a refresh_deadline
         refresh_deadline = 0
         dig = self.hasher.digest(data, source_port)
-        print(dig)
         self.cur_hashes.append(dig)
         self.packet_seq += 1
         if len(self.cur_hashes) < self.packet_limit:
@@ -88,10 +89,17 @@ class ManifestBuilder(object):
             since = datetime.datetime.now() - self.last_wrote
             if since < self.time_limit:
                 return
+
         manifest = struct.pack('IIIHH', self.manifest_id,
                 self.manifest_seq, self.packet_seq - len(self.cur_hashes),
                 refresh_deadline, len(self.cur_hashes))
         manifest += b''.join(self.cur_hashes)
+        if self.sender:
+            taps.print_time("New manifest pushing (%d conns)" % len(self.sender.connections), color)
+            self.loop.create_task(self.sender.push_new_manifest(manifest))
+        else:
+            taps.print_time("New manifest without sender)",
+                color)
         self.last_wrote = datetime.datetime.now()
         self.cur_hashes = []
         self.manifest_seq += 1
@@ -111,8 +119,79 @@ HASH_ALG_MAP = {
     }
 
 class ManifestServer(object):
-    def __init__(self):
-        pass
+    def __init__(self, addr, port, trust_ca, local_identity):
+        self.preconnection = None
+        self.addr = addr
+        self.port = port
+        self.trust_ca = trust_ca
+        self.local_identity = local_identity
+        self.loop = asyncio.get_event_loop()
+        self.connections = []
+
+    async def push_new_manifest(self, manifest):
+        for conn in self.connections:
+            self.loop.create_task(conn.send_message(manifest))
+
+    async def handle_connection_received(self, connection):
+        taps.print_time("Received new Connection.", color)
+        self.connections.append(connection)
+        connection.on_sent(self.handle_sent)
+        connection.on_closed(self.handle_closed)
+        # TBD jake 2019-11-17: http framer
+        # - inbound request for application/ambi
+        # - outbound: response header, then chunked encoding per manifest
+        # self.connection.on_received_partial(self.handle_received_partial)
+        # self.connection.on_received(self.handle_received)
+        # await self.connection.receive(min_incomplete_length=4, max_length=3)
+
+    async def handle_listen_error(self):
+        taps.print_time("Listen Error occured.", color)
+        self.loop.stop()
+
+    async def handle_sent(self, message_ref, connection):
+        taps.print_time("Sent cb received, message " + str(message_ref) +
+                        " has been sent.", color)
+
+    async def handle_stopped(self):
+        taps.print_time("Listener has been stopped")
+
+    async def handle_closed(self, connection):
+        taps.print_time("Connection closed.", color)
+        for idx, conn in zip(range(len(self.connections)), self.connections):
+            if conn is connection:
+                break
+        if idx < len(self.connections):
+            del self.connections[idx]
+        # self.loop.stop()
+
+    async def main(self):
+        yang_data = {
+              "ietf-taps-api:preconnection":{
+                "local-endpoints":[
+                  {
+                    "id":"1",
+                    "local-address":str(self.addr),
+                    "local-port":str(self.port),
+                  }
+                ]
+              }
+            }
+
+        self.preconnection = taps.Preconnection.from_yang(taps.yang_validate.YANG_FMT_JSON, json.dumps(yang_data, indent=4));
+
+        if self.trust_ca or self.local_identity:
+            sp = taps.SecurityParameters()
+            if self.trust_ca:
+                sp.addTrustCA(self.trust_ca)
+            if self.local_identity:
+                sp.addIdentity(self.local_identity)
+            self.preconnection.security_parameters = sp
+
+        self.preconnection.on_connection_received(
+                self.handle_connection_received)
+        self.preconnection.on_listen_error(self.handle_listen_error)
+        self.preconnection.on_stopped(self.handle_stopped)
+        await self.preconnection.listen()
 
 
 class AmbiListener(object):
@@ -158,7 +237,7 @@ class AmbiListener(object):
 
     async def handle_connection_received(self, connection):
         self.connections.append(connection)
-        taps.print_time("Received new Connection (%d total)." % len(self.connections), color)
+        taps.print_time("Received new Data Connection (%d total)." % len(self.connections), color)
         connection.on_received(self.handle_received)
         # jake 2019-11-16: should handle_closed have the connection object?
         connection.on_closed(self.handle_closed)
@@ -166,10 +245,10 @@ class AmbiListener(object):
 
     async def handle_received(self, data, context, connection):
         #taps.print_time("Received message " + str(data) + ".", color)
-        print('got msg len=%d' % len(data))
+        #print('got msg len=%d' % len(data))
         # self.loop.stop()
-        print(type(connection.remote_endpoint.port))
-        print(connection.remote_endpoint.port)
+        #print(type(connection.remote_endpoint.port))
+        #print(connection.remote_endpoint.port)
 
         self.manifest_builder.got_packet(data=data,
                 source_port=int(connection.remote_endpoint.port))
@@ -182,7 +261,7 @@ class AmbiListener(object):
     async def handle_stopped(self):
         taps.print_time("Listener has been stopped")
 
-    async def handle_closed(self):
+    async def handle_closed(self, conn):
         taps.print_time("Connection closed.", color)
         # self.loop.stop()
 
@@ -201,19 +280,31 @@ class AmbiListener(object):
 if __name__ == "__main__":
     # Parse arguments
     ap = argparse.ArgumentParser(description='AMBI generator.')
-    ap.add_argument('--source', '-s', help='source ip')
-    ap.add_argument('--group', '-g', help='group ip')
-    ap.add_argument('--port', '-p', type=int, help='UDP port')
+    ap.add_argument('--datasource', '-s', help='source ip')
+    ap.add_argument('--datagroup', '-g', help='group ip')
+    ap.add_argument('--dataport', '-p', type=int, help='UDP port')
     ap.add_argument('--manifestid', '-m', type=int, help='manifest id')
     ap.add_argument('--algorithm', '-a', help='hash algorithm',
             choices=sorted(HASH_ALG_MAP.keys()))
+    ap.add_argument('--listen-address', '-l',
+            help='listening ip for manifest channel', default='127.0.0.1')
+    ap.add_argument('--listen-port', '-o', help='listening port for manifest channel')
+    ap.add_argument('--local-identity', '-i', default=None)
+    ap.add_argument('--trust-ca', '-t', default=None)
     args = ap.parse_args()
     print(args)
     # Start testclient
-    client = AmbiListener(source=args.source,
-            group=args.group,
-            port=args.port,
+    mc_client = AmbiListener(source=args.datasource,
+            group=args.datagroup,
+            port=args.dataport,
             manifestid=args.manifestid,
             algorithm=args.algorithm)
-    client.loop.create_task(client.main())
-    client.loop.run_forever()
+    manifest_server = ManifestServer(addr=args.listen_address,
+            port=args.listen_port, trust_ca=args.trust_ca,
+            local_identity=args.local_identity)
+    mc_client.manifest_builder.sender = manifest_server
+
+    loop = mc_client.loop
+    loop.create_task(mc_client.main())
+    loop.create_task(manifest_server.main())
+    loop.run_forever()
