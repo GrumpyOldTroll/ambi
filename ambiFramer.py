@@ -9,7 +9,6 @@ from hasher import ManifestHasher
 color="blue"
 color2="red"
 
-
 class AmbiFramer(taps.Framer):
     def __init__(self, remote_endpoint, security_parameters=None, local_endpoint=None):
         self.remote_endpoint = remote_endpoint
@@ -22,14 +21,10 @@ class AmbiFramer(taps.Framer):
         self.group_port = None
         self.manifest_id = 15
         self.hashes = []
-        self.in_mpp = 0
-        self.out_mpp = 0
     
     async def handle_received_partial(self, data, context, end_of_message,
                                       connection):
-        #taps.print_time("Received manifest " + str(data) + ".", color2)
         manifest = struct.unpack_from('IIIHH', data)
-        print("Manifest")
         self.manifest_id = int(manifest[0])
         hashes = data[16:]
         len_hashes = int(len(hashes)/manifest[4])
@@ -51,7 +46,6 @@ class AmbiFramer(taps.Framer):
 
     async def handle_received_data(self, connection):
         self.hasher = ManifestHasher(self.source, self.group, self.group_port,hashes.SHAKE128(16),self.manifest_id)
-        self.in_mpp+=1
         stream, context, eom = self.parse(connection, 0, 0)
         if len(stream) == 0:
             raise taps.DeframingFailed
@@ -59,18 +53,13 @@ class AmbiFramer(taps.Framer):
         timeout = 0
         msg = stream[0]
         hash = self.hasher.digest(msg, connection.remote_endpoint.port)
-        print("Hash")
-        print(hash)
-        while(timeout <= 10):
+        while(timeout <= 2):
             if hash in self.hashes:
-                    print("Hash found")
                     self.hashes.remove(hash)
-                    self.out_mpp+=1
-                    taps.print_time("There have been " + str(self.in_mpp) + " incoming multicast packets while " + str(self.out_mpp) + " have been handed to the application.")
-                    return (None,msg,len(msg),True)
+                    return (None,msg,1,True)
             else:
-                await asyncio.sleep(1)
-                timeout+= 1
+                await asyncio.sleep(0.1)
+                timeout+= 0.1
         raise taps.DeframingFailed
         return
 
