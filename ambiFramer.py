@@ -46,7 +46,7 @@ class AmbiFramer(taps.Framer):
 
     async def handle_received_data(self, connection):
         self.hasher = ManifestHasher(self.source, self.group, self.group_port,hashes.SHAKE128(16),self.manifest_id)
-        stream, context, eom = self.parse(connection, 0, 0)
+        stream, context, eom =connection.parse()
         if len(stream) == 0:
             raise taps.DeframingFailed
             return
@@ -65,10 +65,14 @@ class AmbiFramer(taps.Framer):
 
     async def start(self, connection):
         
+        # Set the parameters required for Manifest hashing
         self.source = ipaddress.ip_address(connection.remote_endpoint.address[0])
         self.group = ipaddress.ip_address(connection.local_endpoint.address[0])
         self.group_port = connection.local_endpoint.port
+
+        # Create new transport properties, since we want a TCP (TLS) conenction, the defaults are fine
         tp = taps.TransportProperties()
+        # Create a new preconnection, set the ready callback and initiate it
         self.preconnection = taps.Preconnection(remote_endpoint=self.remote_endpoint, local_endpoint=self.local_endpoint, transport_properties=tp)
         self.preconnection.on_ready(self.handle_ready)
         self.connection = await self.preconnection.initiate()
@@ -88,21 +92,29 @@ class AmbiClient():
 
     async def handle_connection_received(self, connection):
         self.connection = connection
+        # Set the received callback
         self.connection.on_received(self.handle_received)
+        # Queue the reception of a message on the connection
         await self.connection.receive()
 
 
     async def main(self):
+        # Create (local) multicast group endpoint
         mcg = taps.LocalEndpoint()
         mcg.with_address(args.group_address)
         mcg.with_port(args.group_port)
+
+        # Create (remote) source endpoint
         ssm = taps.RemoteEndpoint()
         ssm.with_address(args.ssm_address)
         ssm.with_port(args.ssm_port)
 
+        # Create endpoint for the remote for AMBI
         rambi = taps.RemoteEndpoint()
         rambi.with_address(args.remote_ambi_address)
         rambi.with_port(args.remote_ambi_port)
+
+        # Create endpoint for the local for AMBI
         if args.local_ambi_address is not None:
             lambi = taps.LocalEndpoint()
             lambi.with_address(args.local_ambi_address)
@@ -110,18 +122,24 @@ class AmbiClient():
         else:
             lambi = None
 
+        # Set the transportpropterties necessary to get a multicast stream
         tp = taps.TransportProperties()
         tp.add("direction", "unidirection-receive")
         tp.prohibit("reliability")
         tp.ignore("congestion-control")
         tp.ignore("preserve-order")
 
+        # Configure the preconnection
         self.preconnection = taps.Preconnection(remote_endpoint=ssm,
                                                 local_endpoint=mcg,
                                                 transport_properties=tp)
+        
+        # Set the new connection callback
         self.preconnection.on_connection_received(self.handle_connection_received)
+        # Create a new AMBI framer object and set it on the preconnection.
         ambi = AmbiFramer(remote_endpoint = rambi, local_endpoint= lambi)
         self.preconnection.add_framer(ambi)
+        # Initiate the preconnection so it can start to received multicast packets
         self.listener = await self.preconnection.listen()
 
 if __name__ == "__main__":
